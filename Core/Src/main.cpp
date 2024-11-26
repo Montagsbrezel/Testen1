@@ -1,9 +1,8 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file           : main.cpp
+  * @file           : main.c
   * @brief          : Main program body
-  * @mainpage
   ******************************************************************************
   * @attention
   *
@@ -16,6 +15,10 @@
   *
   ******************************************************************************
   */
+
+// Add a new state for reading the results
+// Implement everything with event classes
+
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -23,12 +26,17 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-/**
- * @brief Include zum überprüfen der Erfolgreichen transition zu c++
- */
-#include  <string>
+
+#include <string>
 #include <queue>
-#include <stdio.h>
+#include <memory>
+#include "Events.h"
+#include "Enums.h"
+extern "C"
+{
+	#include "lcd/lcd.h"
+}
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,6 +46,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define GPIO_PIN_BUTTON GPIO_PIN_13
+#define DEBOUNCE_THRESHOLD 20 // ms
+
 
 /* USER CODE END PD */
 
@@ -54,11 +66,24 @@ ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptor
 
 ETH_HandleTypeDef heth;
 
+TIM_HandleTypeDef htim4;
+
+I2C_HandleTypeDef hi2c2;
+
 UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
+
+State currentState = IDLE;
+uint32_t currentTime;
+uint32_t lastButtonPressTime;
+uint32_t buttonPressCount;
+LCD_HandleTypeDef lcd;
+
+std::queue<std::unique_ptr<Event>> event_queue;
+
 
 /* USER CODE END PV */
 
@@ -68,12 +93,63 @@ static void MX_GPIO_Init(void);
 static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
+static void MX_I2C2_Init(void);
+static void MX_TIM4_Init(void);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+void clearQueue()
+{
+    while (!event_queue.empty())
+    {
+        event_queue.pop();
+    }
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_BUTTON)
+  {
+    currentTime = HAL_GetTick();
+    if (currentTime - lastButtonPressTime > DEBOUNCE_THRESHOLD)
+    {
+      if (currentState == IDLE)
+      {
+        currentState = OPERATING;
+        event_queue.push(std::make_unique<TestEventGreenBlink>());
+        event_queue.push(std::make_unique<DisplayEvent>(lcd, "Operating..."));
+        event_queue.push(std::make_unique<StartMeasureEvent>());
+        event_queue.push(std::make_unique<CalculationEvent>());
+        event_queue.push(std::make_unique<FinalCalculationEvent>());
+        event_queue.push(std::make_unique<ShowResultsEvent>());
+        event_queue.push(std::make_unique<TestEventLED>(htim4, BLUE));
+        event_queue.push(std::make_unique<DisplayEvent>(lcd, "Results:"));
+        event_queue.push(std::make_unique<StartEvent>());
+        event_queue.push(std::make_unique<TestEventLED>(htim4, GREEN));
+        event_queue.push(std::make_unique<DisplayEvent>(lcd, "Ready to receive input."));
+      }
+      else if (currentState == OPERATING || currentState == SHOW_RESULTS)
+      {
+        currentState = CLEANING_UP;
+        clearQueue();
+        event_queue.push(std::make_unique<TestEventLED>(htim4, RED));
+        event_queue.push(std::make_unique<DisplayEvent>(lcd, "Cancelled. Cleaning up."));
+        event_queue.push(std::make_unique<CancelEvent>());
+        event_queue.push(std::make_unique<StartEvent>());
+        event_queue.push(std::make_unique<TestEventLED>(htim4, GREEN));
+        event_queue.push(std::make_unique<DisplayEvent>(lcd, "Ready to receive input."));
+      }
+
+      lastButtonPressTime = currentTime;
+    }
+  }
+}
+
 
 /* USER CODE END 0 */
 
@@ -109,30 +185,54 @@ int main(void)
   MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
+  MX_I2C2_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+
+  lcd.i2c = &hi2c2;
+  lcd.i2c_addr = LCD_DEFAULT_ADDR; // 0x27 << 1
+  lcd.backlight_enable = true;
+  LCD_Begin(&lcd);
+  LCD_Clear(&lcd);
+
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+
+  event_queue.push(std::make_unique<StartEvent>());
+  event_queue.push(std::make_unique<TestEventLED>(htim4, GREEN));
+  event_queue.push(std::make_unique<DisplayEvent>(lcd, "Ready to receive input."));
+
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  /**
-   * @brief Hier wird die while-Schleife aufgerufen
-   *
-   *  Hier wird nun ein float ausgegeben um zu Testen, ob die Einstellungen
-   *  übernommen wurden und der Übergang zu c++ mit c+ Befehlen funktioniert hat.
-   */
   while (1)
   {
+
+	if(!event_queue.empty())
+	{
+	  std::unique_ptr<Event> e = std::move(event_queue.front());
+
+	  event_queue.pop();
+
+	  e->handleEvent();
+    }
+	HAL_Delay(500);
+
+
+
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
-	  printf("%f", 1.2445);
   }
   /* USER CODE END 3 */
 }
 
 /**
   * @brief System Clock Configuration
-  * @retval Error Handler
+  * @retval None
   */
 void SystemClock_Config(void)
 {
@@ -225,6 +325,113 @@ static void MX_ETH_Init(void)
 }
 
 /**
+  * @brief I2C2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C2_Init(void)
+{
+  /* USER CODE BEGIN I2C2_Init 0 */
+  /* USER CODE END I2C2_Init 0 */
+  /* USER CODE BEGIN I2C2_Init 1 */
+  /* USER CODE END I2C2_Init 1 */
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.ClockSpeed = 100000;
+  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c2, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c2, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C2_Init 2 */
+  /* USER CODE END I2C2_Init 2 */
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 419;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 255;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -305,6 +512,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
@@ -342,6 +550,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USB_OverCurrent_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
